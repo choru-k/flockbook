@@ -26,9 +26,11 @@ One short line: what this release is about.
 - Herdr app mod: a chat reply that mixes Chinese with English words or numbers (often in a list) no longer loses its last line under the next row.
 - Herdr app mod: an expanded "Ran N commands" shows a multi-line command (a heredoc) as its first line with "…", instead of drawing every line over the rows around it.
 - Herdr app mod: text in a code block can be selected and copied with ⌘C, also across lines, like the rest of a reply. Right-click a code block for Copy code, which copies the whole block.
+- Phone page: the message box sits at the bottom of the screen from the moment an agent opens. In a short conversation, or while one is loading, it stayed half-way up until the messages filled the screen.
 
 ### ⚙️ Changes
 
 - Phone page: opening an agent is a clear morph that runs to its end. Its row becomes the name at the top, a round back button comes in beside it, and the conversation rises in, also when it arrives a moment after the tap. Before, the animation was often cut short and stalled on long conversations. The top bar is now two pieces: the back button (arrow only) and the agent's name.
+- Herdr app mod: the Phone page settings walk you through the setup in four steps (Tailscale on this computer, the phone page on, Tailscale Serve, your phone), each done, to do now, or later, with the address and QR code as the last step.
 
 - Herdr app mod: Flockbook settings are laid out as Herdr's own Settings: General, Phone page and Updates in a sidebar on the left, each setting with its line on the left and its switch on the right.
