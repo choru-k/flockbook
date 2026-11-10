@@ -15,8 +15,17 @@ import { inflateSync } from "node:zlib";
 
 const onlyAt = process.argv.indexOf("--only");
 const only = onlyAt > 0 ? process.argv[onlyAt + 1] : null;
-if (onlyAt > 0 && !["transport", "earlier-held", "morph", "composer"].includes(only)) throw new Error(`unknown web-test section: ${only}`);
+if (onlyAt > 0 && !["transport", "earlier-held", "morph", "composer", "note"].includes(only)) throw new Error(`unknown web-test section: ${only}`);
 const phase = (name) => console.log(`web-test: phase ${name}`);
+// The phone page's morph and composer sections. Every wait is for a state (a morph's end, frames drawn), with a long
+// limit: on a shared CI runner one morph took up to 3 s at CPU 4x, and fixed waits came out too short. The CPU is
+// slowed 4x only with WEB_MORPH_STRICT=1 (a quiet machine, where frame times are checked too); else 2x
+// (WEB_MORPH_CPU to change it).
+const webStrict = process.env.WEB_MORPH_STRICT === "1";
+const webCPU = webStrict ? 4 : Number(process.env.WEB_MORPH_CPU ?? 2);
+const webLimit = 30000;
+const webSettled = "window.__m.vt.every((v) => v.end > 0)";
+const twoFrames = (p) => p.eval("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))");
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const shotsAt = process.argv.indexOf("--shots");
 const shots = shotsAt > 0 ? process.argv[shotsAt + 1] : null;
@@ -174,6 +183,7 @@ try {
   else if (only === "earlier-held") await heldEarlierRun();
   else if (only === "morph") await morph();
   else if (only === "composer") await composerPin();
+  else if (only === "note") await agentNote();
   else if (live) await liveRun();
   else await fakeRun();
 } catch (e) {
@@ -283,6 +293,7 @@ async function liveRun() {
 async function fakeRun() {
   await morph();   // first: its frame times, with no other page open in the browser
   await composerPin();
+  await agentNote();
   phase("pairing and page assets");
   // The page and the socket on one origin, scripts under the CSP.
   const fresh = await page(await context());
@@ -1765,6 +1776,66 @@ function pngDiff(a, b) {
 /** The composer sits at the bottom from the first frame an agent opens: a short conversation, or one still loading,
  *  does not leave it half-way up the screen until the rows fill it. Where it sits is where a long conversation at its
  *  newest has it: the window's bottom less the page's bottom padding (safe area included). */
+/** A note from another agent (`hc send`): `serve` sends its user item with `from` (the sender as hc wrote it). The
+ *  fake hub has no notes: three of its user items are made into notes as they come in, as `serve` sends them. The page
+ *  shows each as one line on the left, "↳ <name>: <first line>" (the name after the terminal id, else the terminal id,
+ *  else "agent"), that opens to the whole note in Markdown. Before, it was a right-aligned bubble, like the owner's own
+ *  message. */
+async function agentNote() {
+  phase("agent note");
+  const p = await page(await context(), true);
+  pages.push(p);
+  await p.onEveryLoad(`(() => {
+    const notes = { "pnote-g0": "t2 docs-worker", "pnote-g3": "t3", "pnote-g6": "" };
+    const W = window.WebSocket;
+    window.WebSocket = function (...a) {
+      const s = new W(...a), add = s.addEventListener.bind(s);
+      s.addEventListener = (type, f, o) => add(type, type !== 'message' ? f : (e) => {
+        let m = null; try { m = JSON.parse(e.data); } catch {}
+        if (m?.type !== 'conversation') return f(e);
+        for (const it of m.items) if (it.id in notes) { it.from = notes[it.id]; it.text = "Done: notes updated.\\n\\nThe **second** paragraph."; }
+        f(new MessageEvent('message', { data: JSON.stringify(m) }));
+      }, o);
+      return s;
+    };
+    window.WebSocket.prototype = W.prototype;
+    Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+  })()`);
+  await p.goto(origin + "/");
+  await p.eval("localStorage.setItem('flockbook.token', 'input-token')");
+  hub.stdin.write("session w2:p2 pnote 0\ngrow pnote 10\n");
+  try {
+    await p.eval("location.hash = '#pane=w2%3Ap2'; true");
+    await p.reload();
+    const at = "document.querySelector(\"section.conversation .items > [data-id='pnote-g9']\")";
+    check(!!await p.until(`!!${at}`, webLimit), "note: the conversation with the notes loads");
+    const read = (id) => p.eval(`(() => { const e = document.querySelector("section.conversation .items > [data-id='${id}']"); if (!e) return null;
+      const items = e.parentElement.getBoundingClientRect(), line = e.querySelector('summary') ?? e, r = line.getBoundingClientRect();
+      const body = e.querySelector('.note-body'), shown = !!body && body.checkVisibility();
+      return { bubble: !!e.querySelector('.msg.user') || e.matches('.msg.user'), line: line.textContent.trim(), left: Math.round(r.left - items.left),
+        right: Math.round(items.right - r.right), oneLine: r.height < 48, shown, strong: shown ? body.querySelector('strong')?.textContent ?? null : null }; })()`);
+    const a = await read("pnote-g0");
+    check(!!a && !a.bubble && a.line.startsWith("↳ docs-worker: Done: notes updated.") && !a.line.includes("second") && a.oneLine,
+      `note: one line, "↳ docs-worker: <first line>", not a bubble (${JSON.stringify(a)})`);
+    check(!!a && a.left <= 4, `note: on the left, where the agent's side is (a bubble starts at the right) (${JSON.stringify(a)})`);
+    check(!!a && !a.shown, `note: closed at first (${JSON.stringify(a)})`);
+    const b = await read("pnote-g3"), c = await read("pnote-g6");
+    check(!!b && b.line.startsWith("↳ t3: ") && !!c && c.line.startsWith("↳ agent: "),
+      `note: with no name, the terminal id; with neither, "agent" (${b?.line} | ${c?.line})`);
+    await p.eval(`document.querySelector("section.conversation .items > [data-id='pnote-g0'] summary")?.click(); true`);
+    await twoFrames(p);
+    const open = await read("pnote-g0");
+    check(!!open && open.shown && open.strong === "second", `note: a tap opens the whole note, in Markdown (${JSON.stringify(open)})`);
+    const user = await read("pnote-g9");
+    check(!!user && user.bubble, `note: the owner's own message is still a bubble (${JSON.stringify(user)})`);
+  } finally {
+    hub.stdin.write("session w2:p2 s4\n");
+  }
+  await p.close();
+  pages.splice(pages.indexOf(p), 1);
+  check(p.errors.length === 0, `note: no errors (${p.errors.join(" | ")})`);
+}
+
 async function composerPin() {
   phase("composer pin");
   const p = await page(await context(), true);
@@ -1774,27 +1845,35 @@ async function composerPin() {
   await p.cdp("Page.bringToFront");
   await p.goto(origin + "/");
   await p.eval("localStorage.setItem('flockbook.token', 'input-token')");
-  /** Opens w2:p2 (session `session`, `rows` rows, each `conversation` held `late` ms); every frame from the tap for
-   *  1.8 s: how far the composer's bottom is from its place. */
+  /** Opens w2:p2 (session `session`, `rows` rows, each `conversation` held `late` ms); every frame from the tap until
+   *  the page is settled (the morph ended, the rows the same for 30 frames): how far the composer's bottom is from its
+   *  place. */
   const open = async (session, rows, late, rich = 0) => {
     hub.stdin.write(`session w2:p2 ${session} ${rows}\n` + (rich ? `rich ${session} ${rich}\n` : ""));
     await p.eval("history.replaceState(null, '', '/')");
     await p.reload();
-    if (!await p.until("!!document.querySelector(\".row[data-pane='w2:p2']\") && !!window.__m", 8000)) throw new Error("composer: the list did not load");
-    await new Promise((r) => setTimeout(r, 300));
-    await p.eval(`window.__m.late = ${late}; window.__pin = []; true`);
-    await p.eval(`(() => { const t0 = performance.now(); const main = document.querySelector('main');
+    if (!await p.until("!!document.querySelector(\".row[data-pane='w2:p2']\") && !!window.__m", webLimit)) throw new Error("composer: the list did not load");
+    await p.until(`document.readyState === 'complete' && ${webSettled}`, webLimit);
+    await twoFrames(p);
+    await p.eval(`window.__m.late = ${late}; window.__pin = []; window.__pinDone = false; true`);
+    await p.eval(`(() => { const t0 = performance.now(), n0 = window.__m.vt.length; const main = document.querySelector('main');
+      let same = 0, last = -1;
       const tick = () => { const c = document.querySelector('section.conversation .composer');
-        if (c) { const r = c.getBoundingClientRect(); window.__pin.push([Math.round(performance.now() - t0), Math.round(r.bottom), Math.round(innerHeight - parseFloat(getComputedStyle(main).paddingBottom)), document.querySelectorAll('section.conversation .items > [data-id]').length]); }
-        if (performance.now() - t0 < 1800) requestAnimationFrame(tick); };
+        const n = document.querySelectorAll('section.conversation .items > [data-id]').length;
+        if (c) { const r = c.getBoundingClientRect(); window.__pin.push([Math.round(performance.now() - t0), Math.round(r.bottom), Math.round(innerHeight - parseFloat(getComputedStyle(main).paddingBottom)), n]); }
+        same = c && n === last ? same + 1 : 0; last = n;
+        const ended = window.__m.vt.length > n0 && window.__m.vt.every((v) => v.end > 0);
+        if ((ended && same >= 30) || performance.now() - t0 > ${webLimit}) { window.__pinDone = true; return; }
+        requestAnimationFrame(tick); };
       requestAnimationFrame(tick); document.querySelector(".row[data-pane='w2:p2']").click(); return true; })()`);
-    await new Promise((r) => setTimeout(r, 2000));
+    await p.until("window.__pinDone", webLimit + 5000);
     return p.eval(`(() => { const f = window.__pin; const off = f.map(([t, b, want]) => b - want);
       const bad = f.filter(([t, b, want]) => Math.abs(b - want) > 2);
       return { frames: f.length, worst: Math.max(0, ...off.map(Math.abs)), first: f[0] ?? null, last: f.at(-1) ?? null, bad: bad.slice(0, 3) }; })()`);
   };
   const ok = (r) => !!r && r.frames >= 10 && r.worst <= 2;
   const says = (r) => JSON.stringify(r);
+  await p.cdp("Emulation.setCPUThrottlingRate", { rate: webCPU });
   try {
     const long = await open("pinlong", 0, 0, 60);
     check(!!long?.last && Math.abs(long.last[1] - long.last[2]) <= 2, `composer: a long conversation at its newest, the composer at the bottom (the place the others are held to) (${says(long?.last)})`);
@@ -1805,6 +1884,7 @@ async function composerPin() {
     const late = await open("pinlate", 40, 400);
     check(ok(late), `composer: rows 400 ms late (loading, then filled) -> at the bottom all along (${says(late)})`);
   } finally {
+    await p.cdp("Emulation.setCPUThrottlingRate", { rate: 1 });
     hub.stdin.write("session w2:p2 s4\n");
   }
   await p.close();
@@ -1823,14 +1903,9 @@ async function morph() {
   await p.goto(origin + "/");
   await p.eval("localStorage.setItem('flockbook.token', 'input-token')");
   hub.stdin.write("session w2:p2 morph 0\nrich morph 100\n");
-  // Every wait below is for a state (a morph's end, two frames drawn), with a long limit: on a shared CI runner one
-  // morph took up to 3 s at CPU 4x, and fixed waits came out too short. The CPU is slowed 4x only with
-  // WEB_MORPH_STRICT=1 (a quiet machine, where frame times are checked too); else 2x (WEB_MORPH_CPU to change it).
-  const strict = process.env.WEB_MORPH_STRICT === "1";
-  const CPU = strict ? 4 : Number(process.env.WEB_MORPH_CPU ?? 2);
-  const LIMIT = 30000;
-  const settled = "window.__m.vt.every((v) => v.end > 0)";
-  const frames = () => p.eval("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))");
+  // Waits on states (see webLimit): the CPU slowed webCPU times.
+  const strict = webStrict, CPU = webCPU, LIMIT = webLimit, settled = webSettled;
+  const frames = () => twoFrames(p);
   const listed = async () => {
     await p.eval("history.replaceState(null, '', '/')");
     await p.reload();

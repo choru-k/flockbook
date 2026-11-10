@@ -97,7 +97,7 @@ struct ConversationView: View {
         case .loading:
             VStack(spacing: 10) {
                 if spinnerDue {
-                    ProgressView().controlSize(.small)
+                    Spinner()
                     Text("Loading conversation…").font(.callout).foregroundStyle(.secondary)
                 }
             }
@@ -218,7 +218,7 @@ struct ConversationView: View {
                     if range.lowerBound > 0 || (onLoadEarlier != nil && moreEarlier) {
                         Button { showEarlier() } label: {
                             HStack(spacing: 6) {
-                                if loadingEarlier { ProgressView().controlSize(.mini) }
+                                if loadingEarlier { Spinner(size: .mini) }
                                 Text(earlierFailed ? "Try again" : range.lowerBound > 0 ? "Show earlier (\(range.lowerBound))" : "Show earlier")
                             }
                         }
@@ -659,9 +659,13 @@ private struct EntryRow: View, Equatable {
     @ViewBuilder private func row(_ item: ConversationItem, foldable: Bool) -> some View {
         switch item.kind {
         case .userText(let t):
-            HStack {
-                Spacer(minLength: min(size.column * 0.2, 120))
-                UserBubble(text: t, size: size, images: item.images)
+            if let note = ConversationParser.hcNote(t) {
+                NoteRow(from: note.from, text: note.text, foldable: foldable)
+            } else {
+                HStack {
+                    Spacer(minLength: min(size.column * 0.2, 120))
+                    UserBubble(text: t, size: size, images: item.images)
+                }
             }
         case .assistantText(let t):
             MarkdownView(text: t, foldable: foldable)
@@ -739,7 +743,7 @@ struct AnchorProbe: NSViewRepresentable {
 private struct EarlierNotice: View {
     var body: some View {
         HStack(spacing: 6) {
-            ProgressView().controlSize(.small)
+            Spinner()
             Text("Loading earlier…").font(.callout).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
@@ -806,6 +810,36 @@ struct UserBubble: View {
             .padding(.horizontal, 14).padding(.vertical, 10)
             .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.bubble))
             .frame(maxWidth: size.column * 0.8, alignment: .trailing)
+    }
+}
+
+/// A note another agent sent with `hc send`: not the owner's message, so no bubble on the right. One line on the left,
+/// `↳ <name>: <first line>`, in the chip style; a click opens the whole note as Markdown under it.
+struct NoteRow: View {
+    let from: String
+    let text: String
+    var foldable = false
+    @State private var open = false
+    @State private var hover = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { withAnimation(.snappy(duration: 0.15)) { open.toggle() } } label: {
+                HStack(spacing: 5) {
+                    Text(ConversationParser.noteLine(from: from, text: text)).font(.callout.weight(.medium)).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.tail)
+                    Image(systemName: "chevron.right").font(.caption2).imageScale(.small).foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                }
+                .padding(.horizontal, 10).frame(height: 26)
+                .background(Color.primary.opacity(hover ? 0.12 : 0.07), in: Capsule())
+                .contentShape(Capsule())
+                .onHover { hover = $0 }
+            }
+            .buttonStyle(.plain)
+            .help(open ? "Hide the note" : "Show the note")
+            if open { MarkdownView(text: text, foldable: foldable).padding(.leading, 10) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -899,7 +933,7 @@ private struct CallHeader: View {
                     .font(.system(.callout, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
                 if call.isError { Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red) }
-                else if call.output == nil { ProgressView().controlSize(.mini) }
+                else if call.output == nil { Spinner(size: .mini) }
                 Image(systemName: "chevron.right").font(.caption2).imageScale(.small).foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(isOpen ? 90 : 0))
             }

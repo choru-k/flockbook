@@ -5,6 +5,10 @@
 // full-width punctuation stays with the character before it, opening punctuation with the one after),
 // letters are counted per character a little wide, and END_PAD px go on the end.
 // No percentage on top: on a long pasted message 8% of the height was many lines of empty space.
+import { splitBlocks, tableCells } from "./blocks.js";
+import { ROW_PAD_Y, BUBBLE_PAD_Y, bubbleTextWidth, BUBBLE_GAP, IMAGES_LINE_H, CHIP_ROW, CHIP_GAP, OPEN_INDENT, CALL_H, CALLS_PAD,
+  SEP_H, FOOTER_H, STATUS_H, CARD_ROW_H, OTHER_H } from "./metrics.js";
+
 export const READ_W = 760;  // the reading column's width at most
 export const GUTTER = 24;   // each side of the column
 
@@ -43,13 +47,14 @@ const NO_END = new Set("（「『【〈《〔｛");
 // punctuation start a line (measured in the VM: 35 full-width characters fit 564 px, 36 wrap), so no
 // slack is kept: a character of slack per line counted a line too many on 5 of 54 measured paragraphs
 // and none too few without it. Latin letters, counted wide, keep their own margin.
-export function proseLines(text, width, fs = FS) {
+// `k`: the chat's text size over the default 16 px (settings: text_size); inline code scales with it.
+export function proseLines(text, width, fs = FS, k = 1) {
   width = Math.max(fs, width);
   // A word: letters, digits, brackets and the marks gpui keeps inside one. A slash starts a new word:
   // gpui breaks "HC_SESSION/HC_SOCKET" before the slash (measured in the VM).
   const units = String(text).match(/`[^`]+`|\/?[A-Za-z0-9_\-+.:@#%&=?!'"$<>~^*()[\]{}]+|\s+|./gsu) ?? [];
   const wide = (u) => isWide(u.codePointAt(0));
-  const size = (u) => u[0] === "`" && u.length > 1 ? (u.length - 2) * CODE_CH + CODE_PAD
+  const size = (u) => u[0] === "`" && u.length > 1 ? (u.length - 2) * CODE_CH * k + CODE_PAD
     : /^\s+$/.test(u) ? fs * 0.3 * u.length
       : wide(u) ? fs : latinWidth(u, fs);
   let n = 1, w = 0;
@@ -69,6 +74,34 @@ export function proseLines(text, width, fs = FS) {
   return n;
 }
 
+// Lines of a table cell (13.5 px) as gpui fills it, measured on a 2× screenshot of a 760 px column (11-10):
+// character by character to the cell's width; a line may break at a space, after a hyphen, or next to a
+// full-width character, and a word with none of these breaks where it must. A full-width ） that does
+// not fit goes to a line of its own. Inline code: Menlo 11.8 px (7.05 px a character) and about 4.5 px
+// padding each side; counted a little wide.
+const CELL_CODE_CH = 7.1, CELL_CODE_PAD = 5;
+export function cellLines(text, width, fs = 13.5, k = 1) {
+  const gs = [];
+  let code = false;
+  for (const ch of String(text).replace(/\*\*/g, "")) {
+    if (ch === "`") { code = !code; gs.push({ ch: "", w: CELL_CODE_PAD }); continue; }
+    const wide = isWide(ch.codePointAt(0));
+    gs.push({ ch, wide, w: code ? CELL_CODE_CH * k : wide ? fs : ch === " " ? fs * 0.3 : latinWidth(ch, fs) });
+  }
+  let n = 1, x = 0, candX = -1;  // candX: where the line may break, in px from its start
+  for (let i = 0; i < gs.length; i++) {
+    const g = gs[i], prev = gs[i - 1];
+    if (x > 0 && (prev.ch === " " || prev.ch === "-" || prev.wide || g.wide)) candX = x;
+    if (x > 0 && x + g.w > width) {
+      n++;
+      x = candX > 0 ? x - candX : 0;
+      candX = -1;
+    }
+    x += g.w;
+  }
+  return n;
+}
+
 export function wrapLines(text, width, fs = 14) {
   let w = 0, n = 1;
   for (let i = 0; i < text.length; i++) {
@@ -80,9 +113,14 @@ export function wrapLines(text, width, fs = 14) {
 
 // `spans`, when given, gets each code box as drawn: { top, bottom, lines } in px from the text's top
 // (the box itself, without its 6 px margin) and its source lines, for finding the box under a point.
-export function markdownHeight(text, width, spans = null) {
-  const CODE_LH = 21;  // TextView at 13 px (Menlo): its own line height, as table text (13.5 px) draws 21
-  let h = 0, p = 0, inCode = false, prevBlank = true;  // h: drawn exactly; p: prose, wraps
+// `k`: the chat's text size over the default 16 px (settings: text_size). Text and its line heights scale
+// by it; padding and margins stay. Headings and list indents are counted at no less than their default
+// size, so a guess never comes out shorter than drawn.
+export function markdownHeight(text, width, spans = null, k = 1) {
+  const CODE_LH = 21 * k;  // TextView at 13 px (Menlo): its own line height
+  const CELL_LH = 22 * k;  // table text at 13.5 px (measured 11-10)
+  const fs = FS * k, lh = LH * k, up = Math.max(1, k);
+  let h = 0, p = 0, prevBlank = true;  // h: drawn exactly; p: prose, wraps
   // A blank line is a 10 px paragraph gap, but not next to a code box or table: their margin is the gap.
   let gap = 0;
   const box = () => { h -= gap; gap = 0; };
@@ -91,79 +129,67 @@ export function markdownHeight(text, width, spans = null) {
   // message with short source lines came out many lines too tall.
   let para = null, lastLevel = null;  // lastLevel: the last list item's nesting, while in a list
   // "**" (bold) is markup, not drawn.
-  const close = () => { if (para) p += proseLines(para.text.replace(/\*\*/g, ""), para.width, para.fs) * para.lh + para.extra; para = null; };
-  const lines = String(text).split("\n");
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li].replace(/\t/g, "    ");
-    // A code box as mdblocks.js draws it: 6 px margin, 10 px padding and a 1 px border, each side.
-    if (/^\s*```/.test(line)) {
-      close(); lastLevel = null;
-      if (!inCode) { box(); if (spans) spans.push({ top: h + p + 6, bottom: 0, lines: [] }); h += 34; }
-      else { prevBlank = true; if (spans) spans.at(-1).bottom = h + p - 6; }
-      inCode = !inCode; continue;
+  const close = () => { if (para) p += proseLines(para.text.replace(/\*\*/g, ""), para.width, para.fs, k) * para.lh + para.extra; para = null; };
+  // The blocks mdblocks.js draws (blocks.js): code boxes and tables on their own, the rest markdown.
+  for (const b of splitBlocks(text)) {
+    if (b.k === "code") {
+      // A code box as mdblocks.js draws it: 6 px margin, 10 px padding and a 1 px border, each side.
+      close(); lastLevel = null; box();
+      if (spans) spans.push({ top: h + p + 6, bottom: 0, lines: [] });
+      h += 34;
+      for (const raw of b.lines) {
+        if (spans) spans.at(-1).lines.push(raw.replace(/\r$/, ""));
+        h += CODE_LH * Math.max(1, wrapLines(raw.replace(/\t/g, "    "), width - 30, 13 * k));
+      }
+      if (spans) spans.at(-1).bottom = h + p - 6;
+      prevBlank = true;
+      continue;
     }
-    if (inCode) { if (spans) spans.at(-1).lines.push(lines[li].replace(/\r$/, "")); h += CODE_LH * Math.max(1, wrapLines(line, width - 30, 13)); continue; }
-    if (!line.trim()) { close(); if (!prevBlank) { h += 10; gap = 10; } prevBlank = true; continue; }
-    prevBlank = false; gap = 0;
-    let m;
-    if ((m = /^(#{1,6})\s/.exec(line))) { close(); lastLevel = null; const size = [30, 25, 22, 20, 17, 16][m[1].length - 1]; p += proseLines(line, width, size) * size * 1.62 + 12; continue; }
-    if (/^\s*\|/.test(line) && li + 1 < lines.length && TABLE_SEP.test(lines[li + 1])) {
-      close(); lastLevel = null;
+    if (b.k === "table") {
       // A table as mdblocks.js draws it: 6 px above and below, a 1 px frame; each row 8 px padding top
-      // and bottom plus a 1 px line, as tall as its tallest cell at the colWidths widths.
-      const rows = [tableCells(line)];
-      let j = li + 2;
-      while (j < lines.length && /^\s*\|/.test(lines[j])) rows.push(tableCells(lines[j++]));
+      // and bottom plus a 1 px line (none on the header), as tall as its tallest cell at the colWidths widths.
+      close(); lastLevel = null;
+      const rows = [b.head, ...b.rows];
       const n = Math.max(...rows.map((r) => r.length));
-      const ws = colWidths(width, rows, n);
-      box(); h += 14;
-      for (const r of rows) h += 17 + 21 * Math.max(1, ...ws.map((w, c) => wrapLines(r[c] ?? "", w - 24, 13.5)));
-      li = j - 1; prevBlank = true;
+      const ws = colWidths(width, rows, n, k);
+      // The paragraph gap above a table stays (unlike a code box's): as counted before the shared parser.
+      gap = 0; h += 14;
+      for (const r of rows) h += 17 + CELL_LH * Math.max(1, ...ws.map((w, c) => cellLines(r[c] ?? "", w - 24, 13.5 * k, k)));
+      prevBlank = true;
       continue;
     }
-    if ((m = /^(\s*)([-*+]|\d+\.)\s/.exec(line))) {
-      // Text is 22 px in per level (measured). A list right under a paragraph (no blank line) still gets
-      // the paragraph gap above it.
-      // Items are 4 px apart; the first item of a list, nested ones too, has no gap above it (measured).
-      const level = m[1].length ? Math.ceil(m[1].length / 4) : 0;
-      if (para && !para.item) p += 10;
-      else if (lastLevel !== null && level <= lastLevel) p += 4;
-      lastLevel = level;
-      close(); para = { text: line.slice(m[0].length), width: width - 22 * (1 + level), fs: FS, lh: LH, extra: 0, item: true };
-      continue;
+    for (const raw of b.text.split("\n")) {
+      const line = raw.replace(/\t/g, "    ");
+      if (!line.trim()) { close(); if (!prevBlank) { h += 10; gap = 10; } prevBlank = true; continue; }
+      prevBlank = false; gap = 0;
+      let m;
+      if ((m = /^(#{1,6})\s/.exec(line))) { close(); lastLevel = null; const size = [30, 25, 22, 20, 17, 16][m[1].length - 1] * up; p += proseLines(line, width, size, k) * size * 1.62 + 12; continue; }
+      if ((m = /^(\s*)([-*+]|\d+\.)\s/.exec(line))) {
+        // Text is 22 px in per level (measured). A list right under a paragraph (no blank line) still gets
+        // the paragraph gap above it.
+        // Items are 4 px apart; the first item of a list, nested ones too, has no gap above it (measured).
+        const level = m[1].length ? Math.ceil(m[1].length / 4) : 0;
+        if (para && !para.item) p += 10;
+        else if (lastLevel !== null && level <= lastLevel) p += 4;
+        lastLevel = level;
+        close(); para = { text: line.slice(m[0].length), width: width - 22 * up * (1 + level), fs, lh, extra: 0, item: true };
+        continue;
+      }
+      if (/^>\s?/.test(line)) {
+        close(); lastLevel = null; para = { text: line.replace(/^>\s?/, ""), width: width - 24 * up, fs, lh, extra: 0 };
+        continue;
+      }
+      // A line under a rule-like or setext marker is left as its own line (rare in chat; counted high).
+      if (/^\s*([-*_=])(\s*\1){2,}\s*$/.test(line)) { close(); lastLevel = null; p += lh; continue; }
+      if (para) { para.text += " " + line.trim(); continue; }
+      lastLevel = null; para = { text: line, width, fs, lh, extra: 0 };
     }
-    if (/^>\s?/.test(line)) {
-      close(); lastLevel = null; para = { text: line.replace(/^>\s?/, ""), width: width - 24, fs: FS, lh: LH, extra: 0 };
-      continue;
-    }
-    // A line under a rule-like or setext marker is left as its own line (rare in chat; counted high).
-    if (/^\s*([-*_=])(\s*\1){2,}\s*$/.test(line)) { close(); lastLevel = null; p += LH; continue; }
-    if (para) { para.text += " " + line.trim(); continue; }
-    lastLevel = null; para = { text: line, width, fs: FS, lh: LH, extra: 0 };
   }
   close();
-  if (spans && inCode) spans.at(-1).bottom = h + p - 6;   // an unclosed fence runs to the end
   return Math.ceil(h + p + (p > 0 ? END_PAD : 0));
 }
 
-const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
-
-// "| a | b |" → ["a", "b"]. An escaped pipe and pipes inside `code` stay in the cell.
-export function tableCells(line) {
-  let s = line.trim();
-  if (s.startsWith("|")) s = s.slice(1);
-  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
-  const out = []; let cur = "", code = false;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === "\\" && s[i + 1] === "|") { cur += "|"; i++; continue; }
-    if (c === "`") code = !code;
-    if (c === "|" && !code) { out.push(cur.trim()); cur = ""; continue; }
-    cur += c;
-  }
-  out.push(cur.trim());
-  return out;
-}
+export { tableCells };
 
 // One line of text, in px at font size fs (markdown marks left out; leans wide like wrapLines).
 export function textWidth(text, fs = 13.5) {
@@ -177,9 +203,9 @@ export function textWidth(text, fs = 13.5) {
 // left is shared out in proportion. If not, the columns that fit their share keep their width and the
 // rest split what is left in proportion to what they want, never under MIN_COL.
 const MIN_COL = 64;
-export function colWidths(width, rows, n) {
+export function colWidths(width, rows, n, k = 1) {
   const inner = Math.max(n * MIN_COL, width - 2);
-  const want = Array.from({ length: n }, (_v, c) => Math.max(MIN_COL, ...rows.map((r) => textWidth(r[c] ?? "") + 24 + 4)));
+  const want = Array.from({ length: n }, (_v, c) => Math.max(MIN_COL, ...rows.map((r) => textWidth(r[c] ?? "", 13.5 * k) + 24 + 4)));
   const total = want.reduce((a, b) => a + b, 0);
   let ws;
   if (total <= inner) ws = want.map((w) => w + (inner - total) * w / total);
@@ -205,24 +231,26 @@ export function colWidths(width, rows, n) {
 export const columnWidth = (paneWidth) => Math.max(240, Math.min(READ_W, (paneWidth || 800) - GUTTER * 2));
 
 // The height of a row. `open`: its tool chip shows the calls, or its note from another agent the whole text.
-export function rowHeight(row, width, open = false) {
+// The sizes are the drawing's (metrics.js).
+export function rowHeight(row, width, open = false, k = 1) {
   switch (row.k) {
     case "user":
-      if (row.from != null) return 40 + (open ? markdownHeight(row.text || "", width - 12) + 4 : 0);
-      return markdownHeight(row.text || "", Math.floor(width * 0.78) - 28) + 20 + 16;
-    case "assistant": return markdownHeight(row.text || "", width) + 16;
+      if (row.from != null) return CHIP_ROW + (open ? markdownHeight(row.text || "", width - OPEN_INDENT, null, k) + CHIP_GAP : 0);
+      return markdownHeight(row.text || "", bubbleTextWidth(width), null, k) + (row.images ? BUBBLE_GAP + IMAGES_LINE_H : 0)
+        + 2 * BUBBLE_PAD_Y + 2 * ROW_PAD_Y;
+    case "assistant": return markdownHeight(row.text || "", width, null, k) + 2 * ROW_PAD_Y;
     case "tools": {
       const calls = (row.chips || []).reduce((n, c) => n + (c.calls || []).length, 0);
-      return 40 + (open ? calls * 26 + 8 : 0);
+      return CHIP_ROW + (open ? calls * CALL_H + CALLS_PAD : 0);
     }
-    case "sep": return 40;
-    case "footer": return 30;
-    case "status": return 34;
-    case "perm": case "question": return 44;
-    default: return 30;
+    case "sep": return SEP_H;
+    case "footer": return FOOTER_H;
+    case "status": return STATUS_H;
+    case "perm": case "question": return CARD_ROW_H;
+    default: return OTHER_H;
   }
 }
 
-export function sizes(rows, width, open = new Set()) {
-  return rows.map((r) => rowHeight(r, width, open.has(r.id)));
+export function sizes(rows, width, open = new Set(), k = 1) {
+  return rows.map((r) => rowHeight(r, width, open.has(r.id), k));
 }

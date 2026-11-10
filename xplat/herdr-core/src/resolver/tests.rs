@@ -559,6 +559,51 @@ fn hc_sessions() {
 }
 
 #[test]
+fn hc_claude_config_dir() {
+    let (_t, cfg) = tmp();
+    let (_d, default_dir) = tmp();
+    fs::create_dir_all(format!("{cfg}/sessions")).unwrap();
+    fs::create_dir_all(format!("{cfg}/projects/-w")).unwrap();
+    let log = format!("{cfg}/projects/-w/sid-cfg.jsonl");
+    fs::write(&log, "{}\n").unwrap();
+    let procs = parse_ps(&format!(
+        "  500     1 Sat Oct 31 10:00:00 2026     -zsh HC_TERMINAL_ID=t1\n  501   500 Sat Oct 31 10:01:00 2026     claude CLAUDE_CONFIG_DIR={cfg} HC_TERMINAL_ID=t1\n"
+    ));
+    let start = procs.iter().find(|p| p.pid == 501).unwrap().start;
+    write_pid_file(&format!("{cfg}/sessions"), 501, "sid-cfg", start);
+    let mut res = resolver(|r| r.claude_dir = default_dir.clone());
+    let need = Need::new("hc:t1", "claude", "/w", vec![501, 500]);
+    assert_eq!(
+        res.resolve_with(&[need], &set(&[]), &HashMap::new(), Some(&procs)).get("hc:t1"),
+        Some(&log),
+        "CLAUDE_CONFIG_DIR of the agent: its pid file and its log"
+    );
+}
+
+#[test]
+fn hc_claude_config_dir_log_later() {
+    let (_t, cfg) = tmp();
+    let (_d, default_dir) = tmp();
+    fs::create_dir_all(format!("{cfg}/sessions")).unwrap();
+    let procs = parse_ps(&format!(
+        "  500     1 Sat Oct 31 10:00:00 2026     -zsh HC_TERMINAL_ID=t1\n  501   500 Sat Oct 31 10:01:00 2026     claude CLAUDE_CONFIG_DIR={cfg} HC_TERMINAL_ID=t1\n"
+    ));
+    let start = procs.iter().find(|p| p.pid == 501).unwrap().start;
+    write_pid_file(&format!("{cfg}/sessions"), 501, "sid-new", start);
+    let mut res = resolver(|r| {
+        r.claude_dir = default_dir.clone();
+        r.retry = 0.0;
+    });
+    let need = Need::new("hc:t1", "claude", "/w", vec![501, 500]);
+    let get = |res: &mut SessionResolver| res.resolve_with(std::slice::from_ref(&need), &set(&[]), &HashMap::new(), Some(&procs)).get("hc:t1").cloned();
+    assert_eq!(get(&mut res), Some("sid-new".into()), "fresh Claude, no turn yet: the bare session id, no log yet");
+    fs::create_dir_all(format!("{cfg}/projects/-w")).unwrap();
+    let log = format!("{cfg}/projects/-w/sid-new.jsonl");
+    fs::write(&log, "{}\n").unwrap();
+    assert_eq!(get(&mut res), Some(log), "the first turn writes the log under the config dir: the same pid file now gives its path");
+}
+
+#[test]
 fn hc_edge_claude_clear() {
     let procs = parse_ps("  500     1 Sat Oct 31 10:00:00 2026     -zsh HC_TERMINAL_ID=t1\n  501   500 Sat Oct 31 10:01:00 2026     claude HC_TERMINAL_ID=t1\n");
     let (_t, dir) = tmp();
@@ -720,4 +765,37 @@ fn codex_subagent_rollouts_are_not_candidates() {
     let mut r = resolver(|r| r.codex_dir = root.clone());
     let got = r.resolve_with(std::slice::from_ref(&need), &set(&[]), &HashMap::new(), Some(&procs)).get("hc:t4").cloned();
     assert_eq!(got, Some(lead), "the lead's rollout resolves although its guardian wrote one in the same cwd");
+}
+
+/// The open-file route: Codex keeps its subagents' rollouts open too (the guardian's, in the same cwd). The pane
+/// resolves to the lead's rollout from its open files alone (no rollout folder to fall back on).
+#[test]
+fn codex_open_subagent_rollout_is_not_the_pane() {
+    let (_t, home) = tmp();
+    let start = Utc::now() - Duration::seconds(120);
+    let day = day_folder(&format!("{home}/.codex/sessions"), local_naive(start).date());
+    fs::create_dir_all(&day).unwrap();
+    let write = |dt: i64, id: &str, source: &str| {
+        let t = start + Duration::seconds(dt);
+        let p = format!("{day}/{}", rollout_name(t, id));
+        let meta = format!(
+            r#"{{"timestamp":"x","type":"session_meta","payload":{{"id":"{id}","timestamp":"{}","cwd":"/w/lead","source":{source}}}}}"#,
+            iso(t)
+        ) + "\n";
+        fs::write(&p, meta).unwrap();
+        p
+    };
+    let lead = write(2, "lead", r#""cli""#);
+    let guardian = write(40, "guardian", r#"{"subagent":{"other":"guardian"}}"#);
+
+    let procs = vec![proc_(900_003, 1, start, "node /opt/bin/codex HC_TERMINAL_ID=t5")];
+    let need = Need::new("hc:t5", "codex", "/w/lead", vec![900_003]);
+    let open = vec![lead.clone(), guardian.clone()];
+    let mut r = resolver(|r| {
+        r.home = home.clone();
+        r.codex_dir = format!("{home}/no-rollout-folder");
+        r.open_files = Box::new(move |pids| if pids.contains(&900_003) { open.clone() } else { vec![] });
+    });
+    let got = r.resolve_with(std::slice::from_ref(&need), &set(&[]), &HashMap::new(), Some(&procs)).get("hc:t5").cloned();
+    assert_eq!(got, Some(lead), "the lead's open rollout, not its guardian's");
 }

@@ -27,6 +27,17 @@ test("cells split on pipes, not on escaped ones or pipes inside code", () => {
   assert.deepEqual(tableCells("| a \\| b | `x|y` | c |"), ["a | b", "`x|y`", "c"]);
 });
 
+test("text size: the default sets no size; another sets it on the text, code boxes and tables, scaled", () => {
+  const T = new Proxy({}, { get: (_t, k) => `#${k}` });
+  const all = (el) => { const out = []; (function walk(n) { if (!n) return; out.push(n); (n.kids ?? []).forEach(walk); })(el); return out; };
+  const text = "Intro\n\n```\ncode\n```\n| H |\n|---|\n| v |";
+  assert.ok(all(markdownView("r", text, T, 600)).every((n) => n._a?.text_size !== 16), "no size at the default");
+  assert.equal(all(markdownView("r", "plain", T, 600, 1))[0]._a?.text_size, undefined, "one block stays a bare view");
+  const small = all(markdownView("r", text, T, 600, 14 / 16)).map((n) => n._a?.text_size).filter(Boolean);
+  assert.deepEqual(small, [14, 13 * 14 / 16, 13.5 * 14 / 16]);
+  assert.equal(all(markdownView("r", "plain", T, 600, 18 / 16))[0]._a?.text_size, 18);
+});
+
 test("the view: rounded code box keeps the indent; rounded table with a header", () => {
   const T = new Proxy({}, { get: (_t, k) => `#${k}` });
   const el = markdownView("r1", "```\n  indented\n```\n| H |\n|---|\n| v |", T);
@@ -51,7 +62,8 @@ test("table cells have a fixed width, so long text wraps inside the table; estim
   assert.ok(ws[1] < 100 && ws[0] > 500, "the short column stays narrow, the long one takes the rest");
   assert.ok(cells.some((c) => "text_right" in c._a), "right-aligned column");
   const short = markdownHeight("x\n| A | B |\n|---|--:|\n| a | 1 |", 602);
-  assert.ok(markdownHeight(text, 602) >= short + 4 * 21, "a wrapped row is guessed taller");
+  // The long cell is drawn on 4 lines of 22 px (word wrap at its width), the short one on 1.
+  assert.ok(markdownHeight(text, 602) >= short + 3 * 22, "a wrapped row is guessed taller");
 });
 
 test("column widths follow the content: short columns keep their size, the space left goes by length", () => {
@@ -125,4 +137,13 @@ test("codeBlockAt finds the code box under a point: several boxes, a box at the 
   assert.equal(codeBlockAt(only, W, markdownHeight(only, W) - 7), "a\nb");
   assert.equal(codeBlockAt(only, W, 3), null, "in the margin");
   assert.equal(codeBlockAt("no code at all", W, 5), null);
+});
+
+test("text view ids stay the same when the message grows a code box (a redraw keeps the selection)", () => {
+  const T = new Proxy({}, { get: (_t, k) => `#${k}` });
+  const ids = (text) => { const out = []; (function walk(n) { if (!n) return; if (n._a?.id) out.push(n._a.id); (n.kids ?? []).forEach(walk); })(markdownView("r1", text, T, 600)); return out; };
+  assert.deepEqual(ids("First paragraph."), ["md-r1-0"], "one block: the same id as the first of many");
+  const grown = ids("First paragraph.\n\n```\nx\n```\nMore.");
+  assert.equal(grown[0], "md-r1-0", "the first text keeps its id when a code box comes after it");
+  assert.equal(new Set(grown).size, grown.length, "ids are unique in the message");
 });

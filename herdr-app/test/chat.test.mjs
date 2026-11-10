@@ -62,8 +62,8 @@ test("estimates: wide characters wrap sooner; code and headings add height", () 
 test("estimates: code boxes and tables are guessed at their drawn height (no wrap margin, no gap)", () => {
   // codeBox: 6 px margin + 10 px padding + 1 px border, each side; 21 px per line (a TextView line at 13 px).
   assert.equal(markdownHeight("```\na\nb\nc\n```", 600), 3 * 21 + 34);
-  // table: 6 px margin + 1 px border each side; a row is 8 + 21 + 8 px plus a 1 px line (1 px high on the head row, on purpose).
-  assert.equal(markdownHeight("| A | B |\n|---|---|\n| a | b |", 600), 14 + 17 + 21 + 17 + 21);
+  // table: 6 px margin + 1 px border each side; a row is 8 + 22 + 8 px plus a 1 px line (1 px high on the head row, on purpose).
+  assert.equal(markdownHeight("| A | B |\n|---|---|\n| a | b |", 600), 14 + 17 + 22 + 17 + 22);
   // The prose gets a small pad at the end, once per text, so a long answer with code is not guessed far too tall.
   const prose = "word ".repeat(30);
   const code = "```\n" + "x = 1\n".repeat(30) + "```";
@@ -376,7 +376,7 @@ test("no element above a chat reply's text stops the press (Herdr 0.1.13: that m
   assert.deepEqual(stops, [], "an element above the reply text stops the left press");
 });
 
-test("right-click on a code box opens a menu with Copy code; it copies that box as written; elsewhere no menu", async () => {
+test("right-click on a code box opens a menu with Copy code (that box as written) and Copy message", async () => {
   const { MenuView } = await import("../mods/flockbook/menu.js");
   const { BAR_H } = await import("../mods/flockbook/top.js");
   const { codeBlockAt } = await import("../mods/flockbook/mdblocks.js");
@@ -391,7 +391,7 @@ test("right-click on a code box opens a menu with Copy code; it copies that box 
   press("a1", 8 + yOf("echo two"));
   const o = log.overlays.at(-1);
   assert.equal(log.overlays.length, n0 + 1);
-  assert.deepEqual(o.props.items.map((i) => i.label), ["Copy code"]);
+  assert.deepEqual(o.props.items.map((i) => i.label), ["Copy code", "Copy message"]);
   fake.props = { view: "menu", items: o.props.items, overlay: "o1" };
   let copied = null;
   const m = new MenuView(fakeCx()).render(fakeCx());
@@ -399,8 +399,37 @@ test("right-click on a code box opens a menu with Copy code; it copies that box 
   assert.equal(copied, "echo two");
   press("a1", 8 + yOf("  tailscale serve 8787"));
   assert.equal(log.overlays.at(-1).props.items[0].args.text, "  tailscale serve 8787");
-  // On the prose, on a user bubble without code, or on an unknown row: no menu.
+  // On the prose, or on a user bubble without code: only Copy message. On an unknown row: no menu.
+  press("a1", 8 + 4);
+  assert.deepEqual(log.overlays.at(-1).props.items.map((i) => i.label), ["Copy message"]);
+  press("u1", BAR_H + 20);
+  assert.deepEqual(log.overlays.at(-1).props.items.map((i) => i.label), ["Copy message"]);
   const n1 = log.overlays.length;
-  press("a1", 8 + 4); press("u1", BAR_H + 20); press("gone", 10);
+  press("gone", 10);
   assert.equal(log.overlays.length, n1);
+});
+
+test("Copy message copies the row's markdown as written, for user, assistant and note rows; not for others", async () => {
+  const { MenuView } = await import("../mods/flockbook/menu.js");
+  const reply = "**Done.**\n\n- one\n- two\n\n```sh\nmake\n```";
+  const note = { type: "row", id: "n1", k: "user", from: "t2 docs-worker", text: "Notes updated.\nSee notes.md" };
+  fake.exec = () => jl(header, logLine("c1"), { type: "splice", at: 0, count: 4 }, user("u1", "Fix `a.rs`, please"), asst("a1", reply),
+    note, { type: "row", id: "s1", k: "status", text: "Interrupted" }, end);
+  const cx = fakeCx(); const v = new ChatView(cx); await cx.settle(); v.width = 900;
+  v.render(cx);
+  const copy = (key) => {
+    const n = log.overlays.length;
+    lastList._h.on_item_secondary_click(key, { button: "right", position: { x: 0, y: 200 }, local_position: { x: 50, y: 200 } }, cx);
+    if (log.overlays.length === n) return null;
+    const items = log.overlays.at(-1).props.items;
+    fake.props = { view: "menu", items, overlay: "o1" };
+    let copied = null;
+    const m = new MenuView(fakeCx()).render(fakeCx());
+    byId(m, `menu-${items.findIndex((i) => i.label === "Copy message")}`)._h.on_click({}, { ...fakeCx(), write_to_clipboard: (s) => { copied = s; } });
+    return copied;
+  };
+  assert.equal(copy("u1"), "Fix `a.rs`, please");
+  assert.equal(copy("a1"), reply);
+  assert.equal(copy("n1"), "Notes updated.\nSee notes.md");
+  assert.equal(copy("s1"), null, "a status row has no menu");
 });
