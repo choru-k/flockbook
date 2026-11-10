@@ -409,6 +409,20 @@ test("right-click on a code box opens a menu with Copy code (that box as written
   assert.equal(log.overlays.length, n1);
 });
 
+test("a click on a turn's footer copies the agent's reply of that turn: its messages, not the user's or a note", async () => {
+  const note = { type: "row", id: "n1", k: "user", from: "t2 docs-worker", text: "Notes updated." };
+  fake.exec = () => jl(header, logLine("c1"), { type: "splice", at: 0, count: 7 }, user("u1", "first"), asst("a0", "old reply"),
+    user("u2", "Fix it"), asst("a1", "Looking."), note, asst("a2", "**Done.**\n\n```sh\nmake\n```"),
+    { type: "row", id: "f-a2", k: "footer", text: "01:41 · Worked 36s" }, end);
+  const cx = fakeCx(); const v = new ChatView(cx); await cx.settle(); v.width = 900;
+  v.render(cx);
+  let copied = null;
+  lastList._h.on_item_click("f-a2", { ...cx, write_to_clipboard: (s) => { copied = s; } });
+  assert.equal(copied, "Looking.\n\n**Done.**\n\n```sh\nmake\n```");
+  assert.equal(log.notify.at(-1)?.title, "Reply copied");
+  assert.match(textOf(v.body({ k: "footer", id: "f-a2", text: "01:41 · Worked 36s" }, new Proxy({}, { get: (_t, k) => `#${k}` }))), /Copy/);
+});
+
 test("Copy message copies the row's markdown as written, for user, assistant and note rows; not for others", async () => {
   const { MenuView } = await import("../mods/flockbook/menu.js");
   const reply = "**Done.**\n\n- one\n- two\n\n```sh\nmake\n```";

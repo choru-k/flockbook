@@ -3,7 +3,7 @@
 // cannot be scrolled from code, and the chat must open at the newest message. Every row shows in full.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { theme, run, shared, settings } from "herdr";
+import { theme, run, shared, settings, notify } from "herdr";
 import { currentAgent, machineOf, icon, SPIN_MS, FADE, shownScreen, watchEdge, noteWindowHeight, KEY_WIN_H } from "./state.js";
 import { Appear } from "./motion.js";
 import { now, record, flush, loadTiming } from "./timing.js";
@@ -187,7 +187,9 @@ export class ChatView {
       case "sep":
         return h_flex().w_full().h(SEP_H).items_center().justify_center().text_size(11.5).text_color(t.dim).child(row.text || "");
       case "footer":
-        return div().w_full().h(FOOTER_H).pt(2).text_size(11.5).text_color(t.dim).child(row.text || "");
+        // A click on the footer copies the turn's reply (click): "Copy" says so where there is one.
+        return h_flex().w_full().h(FOOTER_H).pt(2).gap(6).items_start().text_size(11.5).text_color(t.dim).child(row.text || "")
+          .when(Boolean(this.reply(row.id)), (el) => el.child(div().text_color(t.muted).child("· Copy")));
       case "status":
         return h_flex().w_full().h(STATUS_H).items_center().justify_center().text_size(12).text_color(t.muted).child(row.text || "");
       case "perm": {
@@ -269,9 +271,28 @@ export class ChatView {
     return openMenu(items);
   }
 
+  // The agent's messages of the turn a footer closes, as written, one blank line apart: back to the user's
+  // message before it (notes from other agents are not the reply). Null when the turn has none.
+  reply(footerId) {
+    const rows = this.feed()?.rows ?? [];
+    const at = rows.findIndex((r) => r.id === footerId);
+    const out = [];
+    for (let i = at - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.k === "user" && r.from == null) break;
+      if (r.k === "assistant" && r.text) out.unshift(r.text);
+    }
+    return out.length ? out.join("\n\n") : null;
+  }
+
   click(key, cx) {
     const row = this.feed()?.rows.find((r) => r.id === key);
     if (!row) return;
+    if (row.k === "footer") {
+      const text = this.reply(row.id);
+      if (text) { cx?.write_to_clipboard?.(text); notify({ title: "Reply copied", level: "info", timeout: 1500 }); }
+      return;
+    }
     if (row.k === "tools" || (row.k === "user" && row.from != null)) {
       if (this.open.has(row.id)) this.open.delete(row.id); else this.open.add(row.id);
       cx.notify();
