@@ -9,7 +9,7 @@ import { Appear } from "./motion.js";
 import { now, record, flush, loadTiming } from "./timing.js";
 import * as sidecar from "./sidecar.js";
 import { emptyFeed, applyFeed, applyOlder, olderFrom } from "./feedstate.js";
-import { GUTTER, columnWidth, rowHeight } from "./estimate.js";
+import { GUTTER, columnWidth, rowHeight, lineHeight, FS } from "./estimate.js";
 import { ROW_PAD_Y, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_GAP, IMAGES_FS, bubbleWidth, bubbleTextWidth, CHIP_H, CHIP_PAD_Y, CHIP_GAP, OPEN_INDENT,
   CALL_H, SEP_H, FOOTER_H, STATUS_H, CARD_ROW_H, OTHER_H } from "./metrics.js";
 import { Composer } from "./composer.js";
@@ -166,7 +166,10 @@ export class ChatView {
     const w = this.colWidth(), open = this.open.has(row.id), k = textScale(), zoom = appZoom();
     const c = this.heights.get(row);
     if (c && c.w === w && c.open === open && c.k === k && c.zoom === zoom) return c.h;
-    const h = rowHeight(row, w, open, k, zoom);
+    // choru fork: one more prose line under each message, so a guess a line short (a wrap counted narrow, a
+    // rounding) still shows it whole; the cost is that much space under each one.
+    const spare = row.k === "assistant" || (row.k === "user" && (row.from == null || open)) ? lineHeight(FS * k, zoom) : 0;
+    const h = rowHeight(row, w, open, k, zoom) + spare;
     this.heights.set(row, { w, open, k, zoom, h });
     return h;
   }

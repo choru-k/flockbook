@@ -165,7 +165,7 @@ test("a note from another agent (hc) is one short line with its sender; a click 
   assert.ok(lastList._args.sizes[1] > closed, "open, the row grows");
   rendered = lastList._args.render({ start: 0, end: 3 });
   assert.match(textOf(rendered[1]), /See notes\.md for the list\./);
-  assert.equal(v.height(v.feed().rows[1]), rowHeight(note, v.colWidth(), true));
+  assert.equal(v.height(v.feed().rows[1]), rowHeight(note, v.colWidth(), true) + LH, "plus the choru fork's spare line");
   lastList._h.on_item_click("u1", cx);
   assert.ok(!v.open.has("u1"), "a click on the owner's message opens nothing");
 });
